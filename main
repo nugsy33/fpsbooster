@@ -1,40 +1,22 @@
 --========================================================
--- ULTRA FPS BOOST
--- OPTIMIZED / LOW STUTTER
--- LocalScript -> StarterPlayerScripts
+-- ULTRA FPS BOOST v3
+-- STABLE / LOW STUTTER / MODERN UI
+-- MINIMIZE + FUTURISTIC N LOGO
 --========================================================
 
 local Players = game:GetService("Players")
 local Workspace = game:GetService("Workspace")
 local UserInputService = game:GetService("UserInputService")
-local RunService = game:GetService("RunService")
 
 local Player = Players.LocalPlayer
+local PlayerGui = Player:WaitForChild("PlayerGui")
 
 --========================================================
 -- SETTINGS
 --========================================================
 
-local FPSBoost = false
-
--- Ukuran Virtual Floor
-local FLOOR_SIZE = 500
-
--- Object yang diproses setiap batch
-local BATCH_SIZE = 75
-
--- Jarak minimum sebelum floor dipindahkan
-local FLOOR_MOVE_DISTANCE = 4
-
--- Jarak yang dianggap teleport
-local TELEPORT_DISTANCE = 30
-
--- Jeda antar batch
-local BATCH_DELAY = 0.03
-
---========================================================
--- REAPPLY SETTINGS
---========================================================
+local BATCH_SIZE = 35
+local BATCH_DELAY = 0.05
 
 local ReapplyOptions = {
 	["OFF"] = 0,
@@ -44,36 +26,34 @@ local ReapplyOptions = {
 	["1 HOUR"] = 3600
 }
 
-local ReapplyMode = "5 MIN"
-local ReapplyThread = nil
+--========================================================
+-- STATE
+--========================================================
 
---========================================================
--- STORAGE
---========================================================
+local FPSBoost = false
+local ReapplyMode = "OFF"
 
 local Saved = {}
 
-local ObjectQueue = {}
+local Queue = {}
 local QueueIndex = 1
 local QueuedObjects = {}
 
-local ProcessingQueue = false
+local WorkerRunning = false
+local ScanRunning = false
+local ReapplyRunning = false
 
---========================================================
--- VIRTUAL FLOOR
---========================================================
-
-local VirtualFloor = nil
-local FloorConnection = nil
-
-local FloorY = nil
-local LastFloorPosition = nil
+local Destroyed = false
 
 --========================================================
 -- CHARACTER CHECK
 --========================================================
 
 local function IsCharacter(obj)
+
+	if not obj then
+		return true
+	end
 
 	for _, player in ipairs(Players:GetPlayers()) do
 
@@ -82,7 +62,6 @@ local function IsCharacter(obj)
 		if character and obj:IsDescendantOf(character) then
 			return true
 		end
-
 	end
 
 	return false
@@ -98,26 +77,25 @@ local function SaveObject(obj)
 		return
 	end
 
-	-- BasePart
 	if obj:IsA("BasePart") then
 
 		Saved[obj] = {
 			Type = "BasePart",
-			CanCollide = obj.CanCollide,
-			CanTouch = obj.CanTouch,
-			CanQuery = obj.CanQuery,
-			CastShadow = obj.CastShadow
+			LocalTransparencyModifier =
+				obj.LocalTransparencyModifier,
+			CastShadow =
+				obj.CastShadow
 		}
 
-	-- Decal / Texture
-	elseif obj:IsA("Decal") or obj:IsA("Texture") then
+	elseif obj:IsA("Decal")
+		or obj:IsA("Texture") then
 
 		Saved[obj] = {
 			Type = "Texture",
-			Transparency = obj.Transparency
+			Transparency =
+				obj.Transparency
 		}
 
-	-- Effects
 	elseif obj:IsA("ParticleEmitter")
 		or obj:IsA("Trail")
 		or obj:IsA("Beam")
@@ -127,9 +105,9 @@ local function SaveObject(obj)
 
 		Saved[obj] = {
 			Type = "Effect",
-			Enabled = obj.Enabled
+			Enabled =
+				obj.Enabled
 		}
-
 	end
 end
 
@@ -151,12 +129,6 @@ local function ProcessObject(obj)
 		return
 	end
 
-	-- Jangan proses Virtual Floor
-	if obj == VirtualFloor then
-		return
-	end
-
-	-- Jangan proses character
 	if IsCharacter(obj) then
 		return
 	end
@@ -169,12 +141,9 @@ local function ProcessObject(obj)
 
 		SaveObject(obj)
 
+		-- Visual optimization only.
+		-- Collision is intentionally untouched.
 		obj.LocalTransparencyModifier = 1
-
-		obj.CanCollide = false
-		obj.CanTouch = false
-		obj.CanQuery = false
-
 		obj.CastShadow = false
 
 		return
@@ -184,7 +153,8 @@ local function ProcessObject(obj)
 	-- DECAL / TEXTURE
 	--====================================================
 
-	if obj:IsA("Decal") or obj:IsA("Texture") then
+	if obj:IsA("Decal")
+		or obj:IsA("Texture") then
 
 		SaveObject(obj)
 
@@ -194,7 +164,7 @@ local function ProcessObject(obj)
 	end
 
 	--====================================================
-	-- EFFECT
+	-- PARTICLE / EFFECT
 	--====================================================
 
 	if obj:IsA("ParticleEmitter")
@@ -210,11 +180,10 @@ local function ProcessObject(obj)
 
 		return
 	end
-
 end
 
 --========================================================
--- ADD OBJECT TO QUEUE
+-- QUEUE OBJECT
 --========================================================
 
 local function QueueObject(obj)
@@ -231,72 +200,78 @@ local function QueueObject(obj)
 		return
 	end
 
-	-- Jangan queue Virtual Floor
-	if obj == VirtualFloor then
+	if IsCharacter(obj) then
 		return
 	end
 
-	-- Jangan duplicate
 	if QueuedObjects[obj] then
 		return
 	end
 
 	QueuedObjects[obj] = true
 
-	ObjectQueue[#ObjectQueue + 1] = obj
-
+	Queue[#Queue + 1] = obj
 end
 
 --========================================================
--- PROCESS QUEUE
+-- WORKER
 --========================================================
 
-local function ProcessQueue()
+local function StartWorker()
 
-	if ProcessingQueue then
+	if WorkerRunning then
 		return
 	end
 
-	ProcessingQueue = true
+	WorkerRunning = true
 
-	while FPSBoost do
+	task.spawn(function()
 
-		-- Semua object sudah diproses
-		if QueueIndex > #ObjectQueue then
-			break
-		end
+		while FPSBoost and not Destroyed do
 
-		local processed = 0
+			local processed = 0
 
-		while processed < BATCH_SIZE
-			and QueueIndex <= #ObjectQueue do
+			while FPSBoost
+				and not Destroyed
+				and QueueIndex <= #Queue
+				and processed < BATCH_SIZE
+			do
 
-			local obj = ObjectQueue[QueueIndex]
+				local obj = Queue[QueueIndex]
 
-			QueueIndex += 1
+				QueueIndex += 1
+				processed += 1
 
-			if obj then
-				QueuedObjects[obj] = nil
+				if obj then
 
-				if obj.Parent then
-					ProcessObject(obj)
+					QueuedObjects[obj] = nil
+
+					if obj.Parent then
+						ProcessObject(obj)
+					end
 				end
 			end
 
-			processed += 1
+			-- Queue selesai
+			if QueueIndex > #Queue then
+
+				table.clear(Queue)
+				table.clear(QueuedObjects)
+
+				QueueIndex = 1
+
+				break
+			end
+
+			task.wait(BATCH_DELAY)
 		end
 
-		-- Beri waktu renderer/game bekerja
-		task.wait(BATCH_DELAY)
-
-	end
-
-	ProcessingQueue = false
-
+		WorkerRunning = false
+	end)
 end
 
 --========================================================
--- START FULL SCAN
+-- FULL SCAN
 --========================================================
 
 local function StartFullScan()
@@ -305,474 +280,398 @@ local function StartFullScan()
 		return
 	end
 
-	-- Jangan membuat queue lama menumpuk
-	if QueueIndex > #ObjectQueue then
-
-		table.clear(ObjectQueue)
-		table.clear(QueuedObjects)
-
-		QueueIndex = 1
-
-	end
-
-	-- Snapshot object
-	local descendants = Workspace:GetDescendants()
-
-	for _, obj in ipairs(descendants) do
-
-		if not FPSBoost then
-			break
-		end
-
-		QueueObject(obj)
-
-	end
-
-	-- Jalankan processor
-	task.spawn(ProcessQueue)
-
-end
-
---========================================================
--- CREATE VIRTUAL FLOOR
---========================================================
-
-local function CreateVirtualFloor()
-
-	-- Hapus connection lama
-	if FloorConnection then
-		FloorConnection:Disconnect()
-		FloorConnection = nil
-	end
-
-	-- Hapus floor lama
-	if VirtualFloor then
-		VirtualFloor:Destroy()
-		VirtualFloor = nil
-	end
-
-	local character = Player.Character
-
-	if not character then
+	if ScanRunning then
 		return
 	end
 
-	local root = character:FindFirstChild("HumanoidRootPart")
+	ScanRunning = true
 
-	if not root then
-		return
-	end
+	task.spawn(function()
 
-	--====================================================
-	-- INITIAL POSITION
-	--====================================================
+		local descendants
 
-	FloorY = root.Position.Y - 3.1
+		pcall(function()
+			descendants = Workspace:GetDescendants()
+		end)
 
-	LastFloorPosition = root.Position
+		if descendants then
 
-	--====================================================
-	-- CREATE PART
-	--====================================================
+			for _, obj in ipairs(descendants) do
 
-	VirtualFloor = Instance.new("Part")
+				if not FPSBoost
+					or Destroyed then
+					break
+				end
 
-	VirtualFloor.Name = "FPSBoostVirtualFloor"
+				QueueObject(obj)
 
-	VirtualFloor.Size = Vector3.new(
-		FLOOR_SIZE,
-		1,
-		FLOOR_SIZE
-	)
-
-	VirtualFloor.Anchored = true
-
-	-- PENTING
-	VirtualFloor.CanCollide = true
-
-	VirtualFloor.CanTouch = false
-	VirtualFloor.CanQuery = false
-
-	VirtualFloor.Transparency = 1
-
-	VirtualFloor.CastShadow = false
-
-	VirtualFloor.Position = Vector3.new(
-		root.Position.X,
-		FloorY,
-		root.Position.Z
-	)
-
-	VirtualFloor.Parent = Workspace
-
-	--====================================================
-	-- FLOOR UPDATE
-	--====================================================
-
-	FloorConnection = RunService.Heartbeat:Connect(function()
-
-		if not FPSBoost then
-			return
-		end
-
-		if not VirtualFloor then
-			return
-		end
-
-		if not VirtualFloor.Parent then
-			return
-		end
-
-		if not root then
-			return
-		end
-
-		if not root.Parent then
-			return
-		end
-
-		local currentPosition = root.Position
-
-		if not LastFloorPosition then
-
-			LastFloorPosition = currentPosition
-
-			return
-		end
-
-		local difference =
-			currentPosition - LastFloorPosition
-
-		local horizontalDistance =
-			Vector3.new(
-				difference.X,
-				0,
-				difference.Z
-			).Magnitude
-
-		local totalDistance =
-			difference.Magnitude
-
-		--================================================
-		-- TELEPORT DETECTION
-		--================================================
-
-		if totalDistance >= TELEPORT_DISTANCE then
-
-			FloorY =
-				currentPosition.Y - 3.1
-
-			VirtualFloor.Position =
-				Vector3.new(
-					currentPosition.X,
-					FloorY,
-					currentPosition.Z
-				)
-
-			LastFloorPosition =
-				currentPosition
-
-			return
-		end
-
-		--================================================
-		-- NORMAL MOVEMENT
-		--================================================
-
-		if horizontalDistance >= FLOOR_MOVE_DISTANCE then
-
-			VirtualFloor.Position =
-				Vector3.new(
-					currentPosition.X,
-					FloorY,
-					currentPosition.Z
-				)
-
-			LastFloorPosition =
-				currentPosition
-
-		end
-
-		--================================================
-		-- COLLISION SAFETY
-		--================================================
-
-		if not VirtualFloor.CanCollide then
-			VirtualFloor.CanCollide = true
-		end
-
-	end)
-
-end
-
---========================================================
--- REMOVE FLOOR
---========================================================
-
-local function RemoveVirtualFloor()
-
-	if FloorConnection then
-
-		FloorConnection:Disconnect()
-
-		FloorConnection = nil
-
-	end
-
-	if VirtualFloor then
-
-		VirtualFloor:Destroy()
-
-		VirtualFloor = nil
-
-	end
-
-	FloorY = nil
-	LastFloorPosition = nil
-
-end
-
---========================================================
--- ENABLE FPS BOOST
---========================================================
-
-local function EnableFPSBoost()
-
-	FPSBoost = true
-
-	-- Buat floor dahulu
-	CreateVirtualFloor()
-
-	-- Scan map secara bertahap
-	StartFullScan()
-
-end
-
---========================================================
--- DISABLE FPS BOOST
---========================================================
-
-local function DisableFPSBoost()
-
-	FPSBoost = false
-
-	-- Hentikan floor
-	RemoveVirtualFloor()
-
-	-- Bersihkan queue
-	table.clear(ObjectQueue)
-
-	table.clear(QueuedObjects)
-
-	QueueIndex = 1
-
-	--====================================================
-	-- RESTORE OBJECT
-	--====================================================
-
-	for obj, data in pairs(Saved) do
-
-		if obj and obj.Parent then
-
-			-- BASEPART
-			if data.Type == "BasePart" then
-
-				obj.LocalTransparencyModifier = 0
-
-				obj.CanCollide =
-					data.CanCollide
-
-				obj.CanTouch =
-					data.CanTouch
-
-				obj.CanQuery =
-					data.CanQuery
-
-				obj.CastShadow =
-					data.CastShadow
-
-			-- TEXTURE
-			elseif data.Type == "Texture" then
-
-				obj.Transparency =
-					data.Transparency
-
-			-- EFFECT
-			elseif data.Type == "Effect" then
-
-				obj.Enabled =
-					data.Enabled
-
+				-- Jangan memenuhi queue sekaligus.
+				if #Queue >= BATCH_SIZE * 3 then
+					StartWorker()
+					task.wait()
+				end
 			end
-
 		end
 
-	end
+		ScanRunning = false
 
-end
-
---========================================================
--- REAPPLY TIMER
---========================================================
-
-local function StartReapplyTimer()
-
-	-- Stop timer lama
-	if ReapplyThread then
-
-		task.cancel(ReapplyThread)
-
-		ReapplyThread = nil
-
-	end
-
-	local seconds =
-		ReapplyOptions[ReapplyMode]
-
-	if seconds == 0 then
-		return
-	end
-
-	ReapplyThread = task.spawn(function()
-
-		while FPSBoost do
-
-			task.wait(seconds)
-
-			if FPSBoost then
-
-				StartFullScan()
-
-			end
-
-		end
-
+		StartWorker()
 	end)
-
 end
 
 --========================================================
 -- NEW OBJECT DETECTION
 --========================================================
 
-Workspace.DescendantAdded:Connect(function(obj)
+local DescendantConnection
+
+DescendantConnection =
+	Workspace.DescendantAdded:Connect(function(obj)
+
+		if not FPSBoost then
+			return
+		end
+
+		QueueObject(obj)
+		StartWorker()
+	end)
+
+--========================================================
+-- RESTORE OBJECTS
+--========================================================
+
+local function RestoreObjects()
+
+	for obj, data in pairs(Saved) do
+
+		if obj and obj.Parent then
+
+			if data.Type == "BasePart" then
+
+				obj.LocalTransparencyModifier =
+					data.LocalTransparencyModifier
+
+				obj.CastShadow =
+					data.CastShadow
+
+			elseif data.Type == "Texture" then
+
+				obj.Transparency =
+					data.Transparency
+
+			elseif data.Type == "Effect" then
+
+				obj.Enabled =
+					data.Enabled
+			end
+		end
+	end
+end
+
+--========================================================
+-- CLEAR QUEUE
+--========================================================
+
+local function ClearQueue()
+
+	table.clear(Queue)
+	table.clear(QueuedObjects)
+
+	QueueIndex = 1
+end
+
+--========================================================
+-- ENABLE
+--========================================================
+
+local function EnableFPSBoost()
+
+	if FPSBoost then
+		return
+	end
+
+	FPSBoost = true
+
+	ClearQueue()
+
+	StartFullScan()
+end
+
+--========================================================
+-- DISABLE
+--========================================================
+
+local function DisableFPSBoost()
 
 	if not FPSBoost then
 		return
 	end
 
-	-- Virtual Floor jangan diproses
-	if obj == VirtualFloor then
+	FPSBoost = false
+
+	ReapplyRunning = false
+
+	ClearQueue()
+
+	RestoreObjects()
+end
+
+--========================================================
+-- REAPPLY LOOP
+--========================================================
+
+local function StartReapply()
+
+	ReapplyRunning = false
+
+	local seconds =
+		ReapplyOptions[ReapplyMode]
+
+	if not seconds or seconds <= 0 then
 		return
 	end
 
-	-- Masukkan queue
-	QueueObject(obj)
+	ReapplyRunning = true
 
-	-- Processor
-	task.spawn(ProcessQueue)
+	task.spawn(function()
 
-end)
+		while FPSBoost
+			and ReapplyRunning
+			and not Destroyed
+		do
+
+			task.wait(seconds)
+
+			if not FPSBoost
+				or not ReapplyRunning
+				or Destroyed then
+				break
+			end
+
+			if not ScanRunning then
+				StartFullScan()
+			end
+		end
+	end)
+end
 
 --========================================================
 -- GUI
 --========================================================
 
+local OldGUI =
+	PlayerGui:FindFirstChild("FPSBoostModern")
+
+if OldGUI then
+	OldGUI:Destroy()
+end
+
 local ScreenGui =
 	Instance.new("ScreenGui")
 
 ScreenGui.Name =
-	"FPSBoostGUI"
+	"FPSBoostModern"
 
-ScreenGui.ResetOnSpawn =
-	false
+ScreenGui.ResetOnSpawn = false
+ScreenGui.IgnoreGuiInset = true
+ScreenGui.DisplayOrder = 999999
+ScreenGui.ZIndexBehavior =
+	Enum.ZIndexBehavior.Sibling
 
-ScreenGui.Parent =
-	Player:WaitForChild("PlayerGui")
+ScreenGui.Parent = PlayerGui
 
 --========================================================
--- MAIN
+-- MAIN PANEL
 --========================================================
 
 local Main =
 	Instance.new("Frame")
 
+Main.Name = "Main"
+
 Main.Size =
-	UDim2.new(
-		0,
-		220,
-		0,
-		145
-	)
+	UDim2.fromOffset(190, 105)
 
 Main.Position =
 	UDim2.new(
 		0,
 		20,
 		0.5,
-		-70
+		-52
 	)
 
 Main.BackgroundColor3 =
 	Color3.fromRGB(
-		25,
+		15,
+		16,
+		21
+	)
+
+Main.BorderSizePixel = 0
+Main.Active = true
+Main.Visible = true
+
+Main.Parent = ScreenGui
+
+local MainCorner =
+	Instance.new("UICorner")
+
+MainCorner.CornerRadius =
+	UDim.new(0, 13)
+
+MainCorner.Parent = Main
+
+local MainStroke =
+	Instance.new("UIStroke")
+
+MainStroke.Color =
+	Color3.fromRGB(
+		75,
+		80,
+		100
+	)
+
+MainStroke.Transparency = 0.25
+MainStroke.Thickness = 1
+
+MainStroke.Parent = Main
+
+--========================================================
+-- HEADER
+--========================================================
+
+local Header =
+	Instance.new("TextLabel")
+
+Header.Size =
+	UDim2.new(
+		1,
+		-60,
+		0,
+		26
+	)
+
+Header.Position =
+	UDim2.fromOffset(
+		10,
+		5
+	)
+
+Header.BackgroundTransparency = 1
+
+Header.Text =
+	"N  FPS BOOST"
+
+Header.TextColor3 =
+	Color3.fromRGB(
+		245,
+		245,
+		250
+	)
+
+Header.TextSize = 13
+Header.Font =
+	Enum.Font.GothamBold
+
+Header.TextXAlignment =
+	Enum.TextXAlignment.Left
+
+Header.Parent = Main
+
+--========================================================
+-- MINIMIZE
+--========================================================
+
+local Minimize =
+	Instance.new("TextButton")
+
+Minimize.Size =
+	UDim2.fromOffset(
 		25,
 		25
 	)
 
-Main.BorderSizePixel = 0
-
-Main.Parent = ScreenGui
-
-local Corner =
-	Instance.new("UICorner")
-
-Corner.CornerRadius =
-	UDim.new(0,10)
-
-Corner.Parent = Main
-
---========================================================
--- TITLE
---========================================================
-
-local Title =
-	Instance.new("TextLabel")
-
-Title.Size =
+Minimize.Position =
 	UDim2.new(
 		1,
-		-20,
-		0,
-		28
-	)
-
-Title.Position =
-	UDim2.new(
-		0,
-		10,
+		-33,
 		0,
 		5
 	)
 
-Title.BackgroundTransparency = 1
-
-Title.Text =
-	"FPS BOOST"
-
-Title.TextColor3 =
+Minimize.BackgroundColor3 =
 	Color3.fromRGB(
-		255,
-		255,
-		255
+		29,
+		31,
+		39
 	)
 
-Title.TextSize = 17
+Minimize.BorderSizePixel = 0
 
-Title.Font =
+Minimize.Text =
+	"−"
+
+Minimize.TextColor3 =
+	Color3.fromRGB(
+		200,
+		205,
+		220
+	)
+
+Minimize.TextSize = 17
+Minimize.Font =
 	Enum.Font.GothamBold
 
-Title.Parent = Main
+Minimize.AutoButtonColor = false
+
+Minimize.Parent = Main
+
+local MinCorner =
+	Instance.new("UICorner")
+
+MinCorner.CornerRadius =
+	UDim.new(0, 7)
+
+MinCorner.Parent = Minimize
+
+--========================================================
+-- STATUS DOT
+--========================================================
+
+local Dot =
+	Instance.new("Frame")
+
+Dot.Size =
+	UDim2.fromOffset(
+		6,
+		6
+	)
+
+Dot.Position =
+	UDim2.new(
+		1,
+		-16,
+		0,
+		15
+	)
+
+Dot.BackgroundColor3 =
+	Color3.fromRGB(
+		85,
+		85,
+		95
+	)
+
+Dot.BorderSizePixel = 0
+Dot.Parent = Main
+
+local DotCorner =
+	Instance.new("UICorner")
+
+DotCorner.CornerRadius =
+	UDim.new(1, 0)
+
+DotCorner.Parent = Dot
 
 --========================================================
 -- FPS BUTTON
@@ -783,43 +682,42 @@ local FPSButton =
 
 FPSButton.Size =
 	UDim2.new(
-		0,
-		190,
+		1,
+		-20,
 		0,
 		32
 	)
 
 FPSButton.Position =
-	UDim2.new(
-		0.5,
-		-95,
-		0,
-		38
+	UDim2.fromOffset(
+		10,
+		37
 	)
 
 FPSButton.BackgroundColor3 =
 	Color3.fromRGB(
-		60,
-		60,
-		60
+		36,
+		37,
+		45
 	)
 
 FPSButton.BorderSizePixel = 0
 
+FPSButton.Text =
+	"FPS BOOST    OFF"
+
 FPSButton.TextColor3 =
 	Color3.fromRGB(
-		255,
-		255,
-		255
+		225,
+		225,
+		230
 	)
 
-FPSButton.TextSize = 13
-
+FPSButton.TextSize = 12
 FPSButton.Font =
 	Enum.Font.GothamBold
 
-FPSButton.Text =
-	"FPS BOOST : OFF"
+FPSButton.AutoButtonColor = false
 
 FPSButton.Parent = Main
 
@@ -827,10 +725,9 @@ local FPSCorner =
 	Instance.new("UICorner")
 
 FPSCorner.CornerRadius =
-	UDim.new(0,7)
+	UDim.new(0, 8)
 
-FPSCorner.Parent =
-	FPSButton
+FPSCorner.Parent = FPSButton
 
 --========================================================
 -- REAPPLY BUTTON
@@ -841,139 +738,280 @@ local ReapplyButton =
 
 ReapplyButton.Size =
 	UDim2.new(
-		0,
-		190,
-		0,
-		32
-	)
-
-ReapplyButton.Position =
-	UDim2.new(
-		0.5,
-		-95,
-		0,
-		78
-	)
-
-ReapplyButton.BackgroundColor3 =
-	Color3.fromRGB(
-		60,
-		60,
-		60
-	)
-
-ReapplyButton.BorderSizePixel = 0
-
-ReapplyButton.TextColor3 =
-	Color3.fromRGB(
-		255,
-		255,
-		255
-	)
-
-ReapplyButton.TextSize = 12
-
-ReapplyButton.Font =
-	Enum.Font.GothamBold
-
-ReapplyButton.Text =
-	"REAPPLY : 5 MIN"
-
-ReapplyButton.Parent = Main
-
-local ReapplyCorner =
-	Instance.new("UICorner")
-
-ReapplyCorner.CornerRadius =
-	UDim.new(0,7)
-
-ReapplyCorner.Parent =
-	ReapplyButton
-
---========================================================
--- STATUS
---========================================================
-
-local Status =
-	Instance.new("TextLabel")
-
-Status.Size =
-	UDim2.new(
 		1,
 		-20,
 		0,
-		22
+		23
 	)
 
-Status.Position =
-	UDim2.new(
-		0,
+ReapplyButton.Position =
+	UDim2.fromOffset(
 		10,
-		0,
-		117
+		76
 	)
 
-Status.BackgroundTransparency = 1
+ReapplyButton.BackgroundTransparency = 1
+ReapplyButton.BorderSizePixel = 0
 
-Status.Text =
-	"Ready"
+ReapplyButton.Text =
+	"Reapply: OFF"
 
-Status.TextColor3 =
+ReapplyButton.TextColor3 =
 	Color3.fromRGB(
-		170,
-		170,
-		170
+		145,
+		148,
+		158
 	)
 
-Status.TextSize = 11
+ReapplyButton.TextSize = 10
+ReapplyButton.Font =
+	Enum.Font.GothamMedium
 
-Status.Font =
-	Enum.Font.Gotham
-
-Status.Parent = Main
+ReapplyButton.Parent = Main
 
 --========================================================
--- UI UPDATE
+-- FUTURISTIC N LOGO
 --========================================================
 
-local function UpdateFPSUI()
+local Logo =
+	Instance.new("TextButton")
+
+Logo.Name = "NLogo"
+
+Logo.Size =
+	UDim2.fromOffset(
+		52,
+		52
+	)
+
+Logo.Position =
+	Main.Position
+
+Logo.BackgroundColor3 =
+	Color3.fromRGB(
+		11,
+		12,
+		17
+	)
+
+Logo.BorderSizePixel = 0
+
+Logo.Text =
+	"N"
+
+Logo.TextColor3 =
+	Color3.fromRGB(
+		240,
+		243,
+		255
+	)
+
+Logo.TextSize = 22
+Logo.Font =
+	Enum.Font.GothamBlack
+
+Logo.Visible = false
+Logo.Active = true
+Logo.AutoButtonColor = false
+
+Logo.Parent = ScreenGui
+
+local LogoCorner =
+	Instance.new("UICorner")
+
+LogoCorner.CornerRadius =
+	UDim.new(
+		0,
+		16
+	)
+
+LogoCorner.Parent = Logo
+
+local LogoStroke =
+	Instance.new("UIStroke")
+
+LogoStroke.Color =
+	Color3.fromRGB(
+		85,
+		95,
+		130
+	)
+
+LogoStroke.Thickness = 2
+LogoStroke.Transparency = 0.1
+
+LogoStroke.Parent = Logo
+
+--========================================================
+-- LOGO STATUS
+--========================================================
+
+local LogoDot =
+	Instance.new("Frame")
+
+LogoDot.Size =
+	UDim2.fromOffset(
+		6,
+		6
+	)
+
+LogoDot.Position =
+	UDim2.new(
+		1,
+		-11,
+		0,
+		7
+	)
+
+LogoDot.BackgroundColor3 =
+	Color3.fromRGB(
+		85,
+		85,
+		95
+	)
+
+LogoDot.BorderSizePixel = 0
+
+LogoDot.Parent = Logo
+
+local LogoDotCorner =
+	Instance.new("UICorner")
+
+LogoDotCorner.CornerRadius =
+	UDim.new(1, 0)
+
+LogoDotCorner.Parent = LogoDot
+
+--========================================================
+-- UPDATE UI
+--========================================================
+
+local function UpdateUI()
 
 	if FPSBoost then
 
 		FPSButton.Text =
-			"FPS BOOST : ON"
+			"FPS BOOST    ON"
 
 		FPSButton.BackgroundColor3 =
 			Color3.fromRGB(
-				40,
-				170,
-				80
+				35,
+				125,
+				75
 			)
 
-		Status.Text =
-			"Ultra optimizer active"
+		FPSButton.TextColor3 =
+			Color3.fromRGB(
+				255,
+				255,
+				255
+			)
+
+		Dot.BackgroundColor3 =
+			Color3.fromRGB(
+				70,
+				220,
+				120
+			)
+
+		LogoDot.BackgroundColor3 =
+			Color3.fromRGB(
+				70,
+				220,
+				120
+			)
+
+		LogoStroke.Color =
+			Color3.fromRGB(
+				70,
+				220,
+				120
+			)
 
 	else
 
 		FPSButton.Text =
-			"FPS BOOST : OFF"
+			"FPS BOOST    OFF"
 
 		FPSButton.BackgroundColor3 =
 			Color3.fromRGB(
-				60,
-				60,
-				60
+				36,
+				37,
+				45
 			)
 
-		Status.Text =
-			"Ready"
+		FPSButton.TextColor3 =
+			Color3.fromRGB(
+				225,
+				225,
+				230
+			)
 
+		Dot.BackgroundColor3 =
+			Color3.fromRGB(
+				85,
+				85,
+				95
+			)
+
+		LogoDot.BackgroundColor3 =
+			Color3.fromRGB(
+				85,
+				85,
+				95
+			)
+
+		LogoStroke.Color =
+			Color3.fromRGB(
+				85,
+				95,
+				130
+			)
 	end
 
+	ReapplyButton.Text =
+		"Reapply: " ..
+		ReapplyMode
 end
 
 --========================================================
--- FPS BUTTON
+-- MINIMIZE / RESTORE
+--========================================================
+
+local Minimized = false
+
+Minimize.MouseButton1Click:Connect(function()
+
+	if Minimized then
+		return
+	end
+
+	Minimized = true
+
+	Logo.Position =
+		Main.Position
+
+	Main.Visible = false
+	Logo.Visible = true
+end)
+
+Logo.MouseButton1Click:Connect(function()
+
+	if not Minimized then
+		return
+	end
+
+	Minimized = false
+
+	Main.Position =
+		Logo.Position
+
+	Logo.Visible = false
+	Main.Visible = true
+end)
+
+--========================================================
+-- FPS TOGGLE
 --========================================================
 
 FPSButton.MouseButton1Click:Connect(function()
@@ -985,104 +1023,123 @@ FPSButton.MouseButton1Click:Connect(function()
 	else
 
 		EnableFPSBoost()
-
-		StartReapplyTimer()
-
 	end
 
-	UpdateFPSUI()
-
+	StartReapply()
+	UpdateUI()
 end)
 
 --========================================================
--- REAPPLY OPTIONS
+-- REAPPLY BUTTON
 --========================================================
 
 local OptionOrder = {
-
 	"OFF",
 	"5 MIN",
 	"15 MIN",
 	"30 MIN",
 	"1 HOUR"
-
 }
 
-local CurrentOption = 2
+local CurrentOption = 1
 
 ReapplyButton.MouseButton1Click:Connect(function()
 
 	CurrentOption += 1
 
-	if CurrentOption >
-		#OptionOrder then
-
+	if CurrentOption > #OptionOrder then
 		CurrentOption = 1
-
 	end
 
 	ReapplyMode =
 		OptionOrder[CurrentOption]
 
-	ReapplyButton.Text =
-		"REAPPLY : " ..
-		ReapplyMode
+	StartReapply()
 
-	if FPSBoost then
-
-		StartReapplyTimer()
-
-	end
-
+	UpdateUI()
 end)
 
 --========================================================
--- DRAG UI
+-- DRAG SYSTEM
+-- MAIN + LOGO
 --========================================================
 
 local Dragging = false
+local DragObject = nil
 local DragStart = nil
 local StartPosition = nil
 
-Main.InputBegan:Connect(function(input)
+local function BeginDrag(object, input)
 
-	if input.UserInputType ==
-		Enum.UserInputType.MouseButton1 then
+	Dragging = true
+	DragObject = object
 
-		Dragging = true
+	DragStart =
+		input.Position
 
-		DragStart =
-			input.Position
+	StartPosition =
+		object.Position
+end
 
-		StartPosition =
-			Main.Position
+local function EndDrag(object)
 
-	end
-
-end)
-
-Main.InputEnded:Connect(function(input)
-
-	if input.UserInputType ==
-		Enum.UserInputType.MouseButton1 then
+	if DragObject == object then
 
 		Dragging = false
-
+		DragObject = nil
 	end
+end
 
-end)
+local function SetupDrag(object)
+
+	object.InputBegan:Connect(function(input)
+
+		if input.UserInputType ==
+			Enum.UserInputType.MouseButton1
+
+			or input.UserInputType ==
+			Enum.UserInputType.Touch then
+
+			BeginDrag(
+				object,
+				input
+			)
+		end
+	end)
+
+	object.InputEnded:Connect(function(input)
+
+		if input.UserInputType ==
+			Enum.UserInputType.MouseButton1
+
+			or input.UserInputType ==
+			Enum.UserInputType.Touch then
+
+			EndDrag(object)
+		end
+	end)
+end
+
+SetupDrag(Main)
+SetupDrag(Logo)
 
 UserInputService.InputChanged:Connect(function(input)
 
-	if Dragging
-		and input.UserInputType ==
-		Enum.UserInputType.MouseMovement then
+	if not Dragging then
+		return
+	end
+
+	if input.UserInputType ==
+		Enum.UserInputType.MouseMovement
+
+		or input.UserInputType ==
+		Enum.UserInputType.Touch then
 
 		local Delta =
 			input.Position -
 			DragStart
 
-		Main.Position =
+		DragObject.Position =
 			UDim2.new(
 				StartPosition.X.Scale,
 				StartPosition.X.Offset +
@@ -1092,9 +1149,7 @@ UserInputService.InputChanged:Connect(function(input)
 				StartPosition.Y.Offset +
 					Delta.Y
 			)
-
 	end
-
 end)
 
 --========================================================
@@ -1103,31 +1158,32 @@ end)
 
 Player.CharacterAdded:Connect(function()
 
-	RemoveVirtualFloor()
-
 	task.wait(1)
 
-	if FPSBoost then
-
-		CreateVirtualFloor()
-
-		StartFullScan()
-
+	if Destroyed then
+		return
 	end
 
+	if FPSBoost then
+		StartFullScan()
+	end
 end)
 
 --========================================================
 -- INITIAL UI
 --========================================================
 
-UpdateFPSUI()
+UpdateUI()
 
-print("================================")
-print(" ULTRA FPS BOOST LOADED")
-print(" Batch processing : ON")
-print(" Object queue : ON")
-print(" Virtual floor : ON")
-print(" Auto detection : ON")
-print(" Reapply : " .. ReapplyMode)
-print("================================")
+print("======================================")
+print("       ULTRA FPS BOOST v3")
+print("======================================")
+print(" Stable Worker : ON")
+print(" Batch Queue   : ON")
+print(" Auto Detect   : ON")
+print(" Heartbeat     : OFF")
+print(" Virtual Floor : OFF")
+print(" Reapply       : " .. ReapplyMode)
+print(" Modern UI     : ON")
+print(" Minimize      : ON")
+print("======================================")
